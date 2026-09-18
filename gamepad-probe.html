@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gamepad probe</title>
+<style>
+  html,body{margin:0;height:100%;background:#090018;color:#eae4ff;
+    font:14px/1.5 "Segoe UI",system-ui,sans-serif;overflow:hidden}
+  #app{position:fixed;inset:0}
+  #ui{position:fixed;left:0;right:0;bottom:0;padding:16px;text-align:center;
+    background:linear-gradient(to top,rgba(9,0,24,.95),rgba(9,0,24,0))}
+  #vrBtn{font:700 16px/1 system-ui;letter-spacing:.2em;padding:12px 28px;color:#00f0ff;
+    background:rgba(0,240,255,.07);border:2px solid #00f0ff;cursor:pointer;text-transform:uppercase}
+  #flat{position:fixed;top:0;left:0;padding:14px 18px;white-space:pre;font-family:Consolas,monospace;
+    font-size:13px;color:#39ff14;text-shadow:0 0 8px rgba(57,255,20,.5)}
+  body.in-vr #flat,body.in-vr #ui{display:none}
+</style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="flat">starting...</div>
+  <div id="ui">
+    <button id="vrBtn" disabled>checking…</button>
+    <div style="margin-top:8px;color:#a08cc8">
+      Pair the Xbox pad first (Settings &gt; Devices &gt; Gamepad), then
+      <b>press a button on it</b> — the Gamepad API stays silent until you do.
+    </div>
+  </div>
+
+<script type="module">
+import * as THREE from './vendor/three.module.js';
+
+// Does a paired Bluetooth gamepad survive entering an immersive session?
+// Everything else about co-op depends on the answer, and nobody documents it,
+// so this reports the truth from inside the headset where you can read it.
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+document.getElementById('app').appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x090018);
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 50);
+camera.position.set(0, 1.6, 0);
+
+// A readable panel floating in front of you, because you cannot see the
+// devtools console while wearing a headset.
+const cv = document.createElement('canvas');
+cv.width = 1024; cv.height = 640;
+const ctx = cv.getContext('2d');
+const tex = new THREE.CanvasTexture(cv);
+const panel = new THREE.Mesh(
+  new THREE.PlaneGeometry(2.4, 1.5),
+  new THREE.MeshBasicMaterial({ map: tex, transparent: true })
+);
+panel.position.set(0, 1.6, -2.2);
+scene.add(panel);
+
+const flat = document.getElementById('flat');
+
+function report() {
+  const session = renderer.xr.getSession();
+  const pads = [...(navigator.getGamepads ? navigator.getGamepads() : [])].filter(Boolean);
+  const lines = [];
+
+  lines.push(`mode          : ${session ? 'IMMERSIVE VR' : 'flat page'}`);
+  lines.push(`getGamepads() : ${pads.length} device(s)`);
+  lines.push('');
+
+  if (!pads.length) {
+    lines.push('  none seen. press a button on the pad --');
+    lines.push('  browsers hide gamepads until one is used.');
+  }
+  for (const p of pads) {
+    const pressed = p.buttons.map((b, i) => (b.pressed ? i : null)).filter((x) => x !== null);
+    lines.push(`  "${p.id}"`.slice(0, 66));
+    lines.push(`    index ${p.index}  axes ${p.axes.map((a) => a.toFixed(2)).join(' ')}`);
+    lines.push(`    buttons down: ${pressed.length ? pressed.join(',') : '-'}`);
+    lines.push(`    rumble: ${p.vibrationActuator ? 'yes' : 'no'}`);
+  }
+
+  lines.push('');
+  const xr = session ? [...session.inputSources] : [];
+  lines.push(`XR input sources: ${xr.length}`);
+  for (const s of xr) {
+    lines.push(`  ${s.handedness} / ${s.targetRayMode}` +
+               (s.gamepad ? `  (gamepad, ${s.gamepad.buttons.length} buttons)` : ''));
+  }
+
+  lines.push('');
+  lines.push(pads.length && session
+    ? '>> VERDICT: the pad IS visible inside VR. Path 1 works.'
+    : session
+      ? '>> VERDICT: no pad inside VR. Needs the networked path.'
+      : '   enter VR to get the verdict.');
+
+  const text = lines.join('\n');
+  flat.textContent = text;
+
+  ctx.fillStyle = '#0d0022'; ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.font = '22px Consolas, monospace';
+  ctx.fillStyle = '#39ff14';
+  text.split('\n').forEach((l, i) => ctx.fillText(l, 24, 40 + i * 27));
+  tex.needsUpdate = true;
+}
+
+renderer.setAnimationLoop(() => { report(); renderer.render(scene, camera); });
+
+addEventListener('gamepadconnected', (e) => console.log('connected:', e.gamepad.id));
+
+const btn = document.getElementById('vrBtn');
+if (navigator.xr) {
+  navigator.xr.isSessionSupported('immersive-vr').then((ok) => {
+    btn.disabled = !ok;
+    btn.textContent = ok ? 'enter vr' : 'no headset';
+    btn.onclick = async () => {
+      const s = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor'] });
+      s.addEventListener('end', () => document.body.classList.remove('in-vr'));
+      await renderer.xr.setSession(s);
+      document.body.classList.add('in-vr');
+    };
+  });
+} else {
+  btn.textContent = 'no webxr';
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>

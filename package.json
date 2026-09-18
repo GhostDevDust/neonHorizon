@@ -1,0 +1,16 @@
+{
+  "name": "neon-horizon",
+  "version": "1.0.0",
+  "description": "Retro-synthwave WebXR shooter for Quest",
+  "scripts": {
+    "start": "node serve.js",
+    "start:http": "node serve.js --http",
+    "itch": "node build-itch.js"
+  },
+  "dependencies": {
+    "selfsigned": "^5.5.0",
+    "three": "^0.169.0",
+    "ws": "^8.21.3"
+  },
+  "private": true
+}
