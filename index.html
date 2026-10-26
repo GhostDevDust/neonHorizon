@@ -61,6 +61,17 @@
   #cross::before { left: 50%; top: 0; width: 2px; height: 100%; margin-left: -1px; }
   #cross::after { top: 50%; left: 0; height: 2px; width: 100%; margin-top: -1px; }
   body.in-vr #cross { display: none; }
+  /* Hit marker: the crosshair kicks out and flashes hot pink when a shot lands. */
+  #cross.hit { animation: crossHit .22s ease-out; }
+  #cross.hit::before, #cross.hit::after { animation: crossHitColor .22s ease-out; }
+  @keyframes crossHit {
+    from { transform: scale(1.6) rotate(45deg); opacity: 1; }
+    to   { transform: none; opacity: .75; }
+  }
+  @keyframes crossHitColor {
+    from { background: #fff; box-shadow: 0 0 10px #ff2975, 0 0 4px #ff2975; }
+    to   { background: #00f0ff; box-shadow: 0 0 6px #00f0ff; }
+  }
 
   /* Edge chevrons pointing at targets outside the flat-screen view. */
   #cues { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; }
@@ -74,6 +85,24 @@
     pointer-events: none;
   }
   body.in-vr #title { display: none; }
+
+  /* During a flat-screen run the page furniture gets out of the way: the title
+     sat over the sun, and a dead "NO VR HEADSET" button over the floor. A live
+     Enter VR button stays. Visibility too, so the hidden button eats no clicks. */
+  #title, #note, #hint, #vrBtn { transition: opacity .6s, visibility .6s; }
+  body.playing #title, body.playing #note, body.playing #hint, body.playing #vrBtn:disabled {
+    opacity: 0; visibility: hidden;
+  }
+  /* Shield lost: a red pulse round the edge of a flat screen. Never in VR. */
+  #hurt {
+    position: fixed; inset: 0; pointer-events: none; opacity: 0;
+    box-shadow: inset 0 0 120px 30px rgba(255, 41, 117, .85);
+  }
+  #hurt.on { animation: hurt .45s ease-out; }
+  @keyframes hurt { from { opacity: 1; } to { opacity: 0; } }
+  body.in-vr #hurt { display: none; }
+  /* Share clip button (src/share.js): the headset's frames never reach the page canvas */
+  body.in-vr gdd-share { display: none; }
 </style>
 </head>
 <body>
@@ -81,6 +110,7 @@
   <div id="title">Neon Horizon</div>
   <div id="cross"></div>
   <canvas id="cues"></canvas>
+  <div id="hurt"></div>
   <div id="ui">
     <button id="vrBtn" disabled>Checking headset…</button>
     <div id="note">Put the headset on, then press Enter VR.</div>

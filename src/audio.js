@@ -6,6 +6,8 @@ let master = null;
 let musicGain = null;
 let seqTimer = null;
 let step = 0;
+let muted = false;   // remembered, so M before the first click still counts
+const VOLUME = 0.55;
 
 export function initAudio() {
   if (ctx) {
@@ -16,12 +18,24 @@ export function initAudio() {
   if (!AC) return null;
   ctx = new AC();
   master = ctx.createGain();
-  master.gain.value = 0.55;
+  master.gain.value = muted ? 0 : VOLUME;
   master.connect(ctx.destination);
   musicGain = ctx.createGain();
   musicGain.gain.value = 0.0;
   musicGain.connect(master);
   return ctx;
+}
+
+// Everything the speakers get, as a MediaStream for the Share clip recorder
+// (share.js). Null until the first gesture has made the context.
+let tap = null;
+export function audioStream() {
+  if (!ctx) return null;
+  if (!tap) {
+    tap = ctx.createMediaStreamDestination();
+    master.connect(tap);
+  }
+  return tap.stream;
 }
 
 function env(node, peak, attack, decay, t0) {
@@ -50,16 +64,21 @@ export function sfxLaser() {
   osc.stop(t + 0.22);
 }
 
-// Filtered noise burst.
+// Filtered noise burst. The noise is made once and reused: rapid fire and a
+// cascade call this many times a second, and a fresh 0.4 s buffer each time
+// is garbage the Quest has to collect mid-fight.
+let explodeBuf = null;
 export function sfxExplode(pitch = 1) {
   if (!ctx) return;
   const t = ctx.currentTime;
-  const len = Math.floor(ctx.sampleRate * 0.4);
-  const buf = ctx.createBuffer(1, len, ctx.sampleRate);
-  const data = buf.getChannelData(0);
-  for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
+  if (!explodeBuf) {
+    const len = Math.floor(ctx.sampleRate * 0.4);
+    explodeBuf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const data = explodeBuf.getChannelData(0);
+    for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
+  }
   const src = ctx.createBufferSource();
-  src.buffer = buf;
+  src.buffer = explodeBuf;
   const filt = ctx.createBiquadFilter();
   filt.type = 'bandpass';
   filt.Q.value = 1.2;
@@ -69,6 +88,22 @@ export function sfxExplode(pitch = 1) {
   env(gain, 0.45, 0.004, 0.34, t);
   src.connect(filt).connect(gain).connect(master);
   src.start(t);
+}
+
+// A shot glancing off a boss that cannot be hurt yet: a short, dull ping,
+// quiet enough to sit under a held beam ticking six times a second.
+export function sfxDeflect() {
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(520, t);
+  osc.frequency.exponentialRampToValueAtTime(380, t + 0.09);
+  env(gain, 0.07, 0.003, 0.09, t);
+  osc.connect(gain).connect(master);
+  osc.start(t);
+  osc.stop(t + 0.12);
 }
 
 // Low descending "you let one through".
@@ -165,8 +200,9 @@ export function stopMusic() {
   if (musicGain && ctx) musicGain.gain.setTargetAtTime(0.0, ctx.currentTime, 0.4);
 }
 
-export function setMuted(muted) {
-  if (master && ctx) master.gain.setTargetAtTime(muted ? 0 : 0.55, ctx.currentTime, 0.1);
+export function setMuted(on) {
+  muted = on;
+  if (master && ctx) master.gain.setTargetAtTime(muted ? 0 : VOLUME, ctx.currentTime, 0.1);
 }
 
 // --- an omen: a crack, then a deep rumble -----------------------------------

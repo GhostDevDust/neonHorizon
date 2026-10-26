@@ -2,7 +2,7 @@ import * as THREE from '../vendor/three.module.js';
 import { PALETTE, CFG, MODES, fallSpeedAt } from './config.js';
 import { buildScenery } from './scenery.js';
 import { TargetField, KINDS } from './targets.js';
-import { Blasters, pickTarget, ORB_RADIUS, WEAPONS, BOLT_SPEED } from './weapons.js';
+import { Blasters, pickTarget, ORB_RADIUS, WEAPONS, BOLT_SPEED, makeStream } from './weapons.js';
 import { Pad } from './gamepad.js';
 import { HUD } from './hud.js';
 import { OffscreenCues } from './offscreen.js';
@@ -10,7 +10,9 @@ import * as Audio from './audio.js';
 import { Net } from './net.js';
 import { SunBoss } from './boss.js';
 import { makeSupernova } from './supernova.js';
+import { makePulsar, makeNebula } from './stellar.js';
 import { Ghosts } from './ghosts.js';
+import { setupShare, shareRunStart, shareSun, shareRunOver } from './share.js';
 
 const HEX = (n) => '#' + n.toString(16).padStart(6, '0');
 
@@ -19,9 +21,12 @@ const HEX = (n) => '#' + n.toString(16).padStart(6, '0');
 //   ?classic      the build as it stood at the start of this session
 //   ?god          shields never run out
 //   ?lives=N      start with N shields, whatever the mode says
+//   ?hitch        log long frames, and any shader compiled mid-game, to the
+//                 console (remote devtools on a Quest)
 const params = new URLSearchParams(location.search);
 if (params.has('classic')) CFG.classic = true;
 if (params.has('god')) CFG.infiniteLives = true;
+const HITCH = params.has('hitch');
 const livesOverride = params.has('lives') ? Math.max(1, parseInt(params.get('lives'), 10) || CFG.lives) : 0;
 if (livesOverride) CFG.lives = livesOverride;
 
@@ -67,6 +72,21 @@ function rumbleAll(strength, ms) {
   }
 }
 
+// A shield lost. The miss sound alone was easy to lose under the music,
+// especially for a meteor that landed behind you. A bump in the hands
+// everywhere; on a flat screen also a red pulse round the edge and a nudge.
+const hurtEl = document.getElementById('hurt');
+const crossEl = document.getElementById('cross');
+function hurt() {
+  if (CFG.classic) return;
+  rumbleAll(0.4, 140);
+  if (renderer.xr.isPresenting) return;
+  shake = Math.max(shake, 0.35);
+  hurtEl.classList.remove('on');
+  void hurtEl.offsetWidth;   // restart the animation if it is already running
+  hurtEl.classList.add('on');
+}
+
 const nova = makeSupernova(scene, camera);
 // One small nova per shard -- no black hole, and a shockwave that stops well
 // short of the players.
@@ -97,6 +117,7 @@ const boss = new SunBoss(scenery, targets, {
   // The blast.
   nova(pos, killer) {
     Audio.sfxSunDeath();
+    shareSun();
     rumbleAll(1, 700);
     if (!renderer.xr.isPresenting) shake = 1;
     for (let i = 0; i < 10; i++) {
@@ -104,7 +125,7 @@ const boss = new SunBoss(scenery, targets, {
         const p = pos.clone().add(new THREE.Vector3(
           (Math.random() - 0.5) * 20, (Math.random() - 0.5) * 20, 2
         ));
-        targets.explosions.burst(p, null, null);
+        targets.explosions.burst(p, null, killer);
       }, i * 60);
     }
     // The shockwave takes every one of the sun's meteors with it, and the
@@ -137,7 +158,7 @@ const boss = new SunBoss(scenery, targets, {
     rumbleAll(0.8, 900);
   },
   // A pulsar going up: a smaller version of the sun's own death.
-  shardNova(pos) {
+  shardNova(pos, killer) {
     Audio.sfxExplode(0.45);
     setTimeout(() => Audio.sfxExplode(0.35), 110);
     rumbleAll(0.7, 350);
@@ -145,7 +166,7 @@ const boss = new SunBoss(scenery, targets, {
     for (let i = 0; i < 5; i++) {
       setTimeout(() => {
         const p = pos.clone().add(new THREE.Vector3((Math.random() - 0.5) * 8, (Math.random() - 0.5) * 8, 1));
-        targets.explosions.burst(p, null, null);
+        targets.explosions.burst(p, null, killer);
       }, i * 70);
     }
   },
@@ -215,9 +236,11 @@ function startGame(mode = 'normal') {
   targets.spawnTimer = 0.8;
   targets.spawnScale = 1;
   boss.reset();
+  bossHitsInFlight.length = 0;   // bolts from the last run do not land in this one
   hud.drawCenter(null);
   hud.drawScore(state);
   Audio.startMusic();
+  shareRunStart();
 }
 
 function showGameOver() {
@@ -237,6 +260,7 @@ function endGame() {
   Audio.stopMusic();
   Audio.sfxGameOver();
   showGameOver();
+  shareRunOver(myBook().score, state.elapsed, state.mode);
 }
 
 // ------------------------------------------------------------------ firing
@@ -306,7 +330,7 @@ function pickPowerup() {
 // How far a shot can reach the sun and what it becomes. Further than a meteor
 // shot: the pulsars and the nebula hang a long way out.
 const BOSS_RANGE = 140;
-const bossHitsInFlight = [];   // { in: seconds until the bolt lands, damage, piece }
+const bossHitsInFlight = [];   // { in: seconds until the bolt lands, damage, piece, deflect }
 
 const fireHooks = {
   // Once per trigger pull, however many pellets it becomes. Returns false when
@@ -344,9 +368,10 @@ const fireHooks = {
     const sun = boss.rayHit(origin, dir, hit ? hit.distance : BOSS_RANGE);
     if (sun) {
       // The shot is drawn as a bolt flying out there, so the hit lands when
-      // the bolt does rather than the instant the trigger is pulled.
-      bossHitsInFlight.push({ in: sun.t / BOLT_SPEED, damage, piece: sun.piece });
-      return { distance: sun.t, far: true };
+      // the bolt does rather than the instant the trigger is pulled. A bolt
+      // that only glances off (not hittable yet) lands as a ping, no damage.
+      bossHitsInFlight.push({ in: sun.t / BOLT_SPEED, damage, piece: sun.piece, deflect: !!sun.deflect });
+      return { distance: sun.t, far: true, deflect: !!sun.deflect };
     }
     if (hit) applyHit(hit.target, damage);
     return hit;
@@ -356,7 +381,7 @@ const fireHooks = {
   probe(origin, dir) {
     const hit = pickTarget(origin, dir, targets.active);
     const sun = boss.rayHit(origin, dir, hit ? hit.distance : BOSS_RANGE);
-    return sun ? { distance: sun.t } : hit;
+    return sun ? { distance: sun.t, deflect: !!sun.deflect } : hit;
   },
   streamOk() {
     return state.phase === 'playing' && !state.paused;
@@ -369,7 +394,7 @@ const fireHooks = {
   orbProbe(from, dir, len) {
     const hit = pickTarget(from, dir, targets.active, len, ORB_RADIUS);
     const sun = boss.rayHit(from, dir, hit ? hit.distance : len);
-    return sun ? { distance: sun.t } : hit;
+    return sun ? { distance: sun.t, deflect: !!sun.deflect } : hit;
   },
   // A shot the other players should see. Visual only -- damage has already
   // gone to the host through `hit` and `bhit`.
@@ -382,11 +407,20 @@ const fireHooks = {
     const hit = pickTarget(from, dir, targets.active, len, ORB_RADIUS);
     const sun = boss.rayHit(from, dir, hit ? hit.distance : len);
     if (sun) {
-      applyBossHit(damage, sun.piece);
-      return { distance: sun.t };
+      if (sun.deflect) Audio.sfxDeflect();
+      else applyBossHit(damage, sun.piece);
+      return { distance: sun.t, deflect: !!sun.deflect };
     }
     if (hit) applyHit(hit.target, damage);
     return hit;
+  },
+  // A shot of ours landed. VR feels it in the hand; a flat screen flashes the
+  // crosshair, which is otherwise the same for a hit and a miss.
+  mark() {
+    if (renderer.xr.isPresenting) return;
+    crossEl.classList.remove('hit');
+    void crossEl.offsetWidth;   // restart the flash if it is already running
+    crossEl.classList.add('hit');
   },
 };
 
@@ -412,6 +446,35 @@ blasters.remoteMuzzle = (id, hand) => ghosts.muzzle(id, hand);
 let poseIn = 0;
 const POSE_EVERY = 0.1;   // seconds between pose updates
 
+// ------------------------------------------------------------ shader warm-up
+// three.js compiles a material the first time it draws it, and on a Quest that
+// is a visible stall -- which, left alone, lands on the biggest moments: the
+// sun's death (nova flash, shockwave, black hole, shards), the pulsars, the
+// nebula, the first held beam. So compile the lot here, behind the title.
+//
+// renderer.compile covers everything in the scene, hidden or not. What is
+// built on demand is not in it yet, so one spare of each lives in a hidden
+// group for good: the real ones share its shader source, so they reuse its
+// program. And because the spares are never disposed, clearing the real ones
+// after a fight does not free the program and leave the next sun to compile it
+// all over again.
+//   ?nowarm   skip it, to compare on a headset (with ?hitch, below)
+const spares = new THREE.Group();
+spares.visible = false;
+scene.add(spares);
+spares.add(
+  makeStream(),
+  makePulsar(scene, 0).group,
+  makeNebula(scene, 0).mesh,
+  scenery.createShard(0, 1, 0, 0),
+);
+if (!params.has('nowarm')) {
+  const t0 = performance.now();
+  renderer.compileAsync(scene, camera).then(() => {
+    console.info(`[warm] shaders ready in ${Math.round(performance.now() - t0)} ms`);
+  });
+}
+
 // ------------------------------------------------------------------- co-op
 const net = new Net();
 // ?host asks the relay to prefer this tab as the world's owner. Open the PC
@@ -430,6 +493,9 @@ const LOST_PANEL = [
   { text: 'WAITING FOR HOST', size: 56, color: HEX(PALETTE.bomb) },
   { text: 'reconnecting', size: 34, color: HEX(PALETTE.gridNear) },
 ];
+// Why our own world is paused. The share window outlasts a trip to another
+// tab, and must not come back as "host is away".
+const pausedPanel = () => (sharePaused ? SHARE_PANEL : AWAY_PANEL);
 
 // A hidden tab gets its animation frames throttled to about one a second. The
 // loop clamps dt to 50ms, so a host that alt-tabs or sets the headset down does
@@ -438,9 +504,9 @@ const LOST_PANEL = [
 // Pausing outright is both honest and easy to recover from.
 document.addEventListener('visibilitychange', () => {
   if (!net.soloOrHost) return;
-  state.paused = document.hidden;
+  state.paused = document.hidden || sharePaused;
   if (state.phase === 'playing') {
-    hud.drawCenter(state.paused ? AWAY_PANEL : null);
+    hud.drawCenter(state.paused ? pausedPanel() : null);
   }
   if (net.connected) broadcastWorld();   // tell them immediately, not in 50ms
 });
@@ -501,9 +567,11 @@ net.on('w', (msg) => {
     if (msg.phase === 'playing') {
       hud.drawCenter(null);
       Audio.startMusic();
+      shareRunStart();
     } else if (msg.phase === 'over') {
       Audio.stopMusic();
       showGameOver();
+      shareRunOver(((msg.books && msg.books[state.me]) || myBook()).score, msg.elapsed, state.mode);
     } else {
       setIdle();
     }
@@ -515,6 +583,11 @@ net.on('w', (msg) => {
 
   state.elapsed = msg.elapsed;
   state.tier = msg.tier || 0;
+  // The host hears the miss when it lands; a client only sees the shield go.
+  if (!CFG.classic && state.phase === 'playing' && msg.lives < state.lives) {
+    Audio.sfxMiss();
+    hurt();
+  }
   state.lives = msg.lives;
   state.books = msg.books || state.books;
   boss.apply(msg.boss);
@@ -587,18 +660,36 @@ net.on('peers', () => {
   // put the game in co-op mode the moment you open it alone.
   state.coop = net.peers.length > 0;
   ghosts.sync(net.connected ? [state.me, ...net.peers] : [], state.me);
+  blasters.pruneRemote(net.connected ? net.peers : []);
   poseIn = 0;   // introduce ourselves to a newcomer straight away
   hud.drawScore(state);
 });
 
 // ------------------------------------------------------------------- loop
 const clock = new THREE.Clock();
+let bodyPlaying = false;
 
+let programsSeen = 0;
 function tick() {
-  const dt = Math.min(clock.getDelta(), 0.05); // clamp after a headset stall
+  const raw = clock.getDelta();
+  const dt = Math.min(raw, 0.05); // clamp after a headset stall
+  if (HITCH) {
+    const programs = renderer.info.programs.length;
+    if (raw > 0.03 || programs > programsSeen) {
+      const fresh = programs > programsSeen ? `, ${programs - programsSeen} new shader(s)` : '';
+      console.info(`[hitch] ${Math.round(raw * 1000)} ms${fresh} -- ${state.phase}, boss ${boss.phase}`);
+    }
+    programsSeen = programs;
+  }
   const t = clock.elapsedTime;
 
   scenery.update(t);
+  // index.html fades the page furniture out while a run is on.
+  const playingNow = state.phase === 'playing' && !CFG.classic;
+  if (playingNow !== bodyPlaying) {
+    bodyPlaying = playingNow;
+    document.body.classList.toggle('playing', playingNow);
+  }
   blasters.weapon = (!CFG.classic && myBook().weapon) || 'blaster';
   // The weapon timer is on the HUD, which only redraws on change. Nudge it once
   // a second while something is counting down.
@@ -608,14 +699,18 @@ function tick() {
     hud.drawScore(state);
   }
   blasters.update(dt);
-  for (let i = bossHitsInFlight.length - 1; i >= 0; i--) {
+  // Held while paused: a bolt fired just before the share window opened would
+  // otherwise land, and could kill the sun, while the world stood still.
+  for (let i = bossHitsInFlight.length - 1; i >= 0 && !state.paused; i--) {
     const h = bossHitsInFlight[i];
     h.in -= dt;
     if (h.in > 0) continue;
     bossHitsInFlight.splice(i, 1);
     // Whatever it was aimed at may have died or moved on while it flew;
     // boss.damage ignores a hit on something no longer there.
-    if (state.phase === 'playing') applyBossHit(h.damage, h.piece);
+    if (state.phase !== 'playing') continue;
+    if (h.deflect) Audio.sfxDeflect();
+    else applyBossHit(h.damage, h.piece);
   }
   if (padNoteFor > 0) {
     padNoteFor -= dt;
@@ -678,10 +773,13 @@ function tick() {
 
     // The staircase steps up silently otherwise, and "why am I suddenly
     // losing?" is a worse feeling than "right, it just got faster".
+    // Only when the speed really changed: once the staircase tops out at
+    // fallMax the steps keep coming every 15 s but nothing gets faster.
     const tier = Math.floor(state.elapsed / CFG.speedEvery);
-    if (tier > state.tier && fallSpeedAt(state.elapsed) < CFG.fallMax + 0.001) {
+    if (tier > state.tier) {
+      const faster = fallSpeedAt(state.elapsed) > fallSpeedAt(state.tier * CFG.speedEvery) + 0.001;
       state.tier = tier;
-      Audio.sfxBlip(440 + tier * 60);
+      if (faster || CFG.classic) Audio.sfxBlip(440 + tier * 60);
     }
 
     // Guarded by ?classic, which is the game before the sun could come for you.
@@ -702,6 +800,7 @@ function tick() {
       Audio.sfxMiss();
       changed = true;
     }
+    if (landed.length) hurt();
 
     // Powerups. Guarded by ?classic, which is the game before they existed.
     if (!CFG.classic) {
@@ -729,8 +828,12 @@ function tick() {
     let cascade = 0;
     for (let i = 0; i < chained.length; i++) {
       // Whoever fired the shot that started the cascade gets paid for it, not
-      // whoever happens to be hosting.
-      score(chained[i].killer != null ? chained[i].killer : state.me, CFG.blastPoints);
+      // whoever happens to be hosting. A cascade nobody started -- a meteor
+      // bursting on the ground -- pays no one; it used to pay the host, so a
+      // run that never fired could still end on a score.
+      const killer = chained[i].killer;
+      if (killer != null) score(killer, CFG.blastPoints);
+      else if (CFG.classic) score(state.me, CFG.blastPoints);
       // One noise for a ten-target cascade, not ten.
       if (cascade++ < 2) Audio.sfxExplode(1.3);
       changed = true;
@@ -815,6 +918,11 @@ async function setupXR() {
       else note.textContent = `Could not start VR: ${err.message}`;
       return;
     }
+    // Headset off or the system menu up: the frame loop stops, and a held
+    // trigger's selectend may never come -- so the beam hum would play on.
+    session.addEventListener('visibilitychange', () => {
+      if (session.visibilityState !== 'visible') blasters.releaseAll();
+    });
     session.addEventListener('end', () => {
       vrBtn.textContent = 'ENTER VR';
       document.body.classList.remove('in-vr');
@@ -895,10 +1003,11 @@ let lastWeaponSecs = -1;
 function restoreCenter() {
   if (state.phase === 'over') showGameOver();
   else if (state.phase === 'idle') setIdle();
-  else hud.drawCenter(state.paused ? AWAY_PANEL : null);
+  else hud.drawCenter(state.paused ? pausedPanel() : null);
 }
 const pad = new Pad({
   onDown: () => {
+    if (sharing) return;   // the pad stays out of the share window
     Audio.initAudio();
     blasters.triggerDown('pad');
   },
@@ -915,7 +1024,9 @@ const keys = new Set();
 let muted = false;
 window.addEventListener('keydown', (e) => {
   keys.add(e.key.toLowerCase());
-  if (e.key === 'm') { muted = !muted; Audio.setMuted(muted); }
+  // Either case (Caps Lock, Shift), and once per press: a held key repeats,
+  // and every repeat would flip it again.
+  if (e.key.toLowerCase() === 'm' && !e.repeat) { muted = !muted; Audio.setMuted(muted); }
 });
 window.addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()));
 
@@ -956,6 +1067,36 @@ window.addEventListener('resize', () => {
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
   cues.resize();
+});
+
+// Share clip: opening the share window lets go of the mouse and, for a solo
+// player or the host, pauses the run the way an away host does.
+let sharing = false;
+let sharePaused = false;
+const SHARE_PANEL = [
+  { text: 'PAUSED', size: 64, color: HEX(PALETTE.sunTop) },
+  { text: 'sharing a clip', size: 34, color: HEX(PALETTE.gridNear) },
+];
+setupShare(canvasEl, {
+  onOpen: () => {
+    sharing = true;
+    keys.clear();
+    blasters.releaseAll();
+    if (document.pointerLockElement) document.exitPointerLock();
+    if (net.soloOrHost && state.phase === 'playing' && !state.paused) {
+      sharePaused = state.paused = true;
+      hud.drawCenter(SHARE_PANEL);
+      if (net.connected) broadcastWorld();
+    }
+  },
+  onClose: () => {
+    sharing = false;
+    if (!sharePaused) return;
+    sharePaused = false;
+    state.paused = document.hidden;
+    restoreCenter();
+    if (net.connected) broadcastWorld();
+  },
 });
 
 window.__NH = { CFG, net, pad, boss, ghosts, scenery, scene, renderer, camera, state, targets, blasters, hud, look, THREE };

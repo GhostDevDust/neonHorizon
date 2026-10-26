@@ -67,7 +67,7 @@ a self-signed cert rather than plain HTTP.
   five shields and pull-the-trigger-to-start.
 - Targets fall from **any** bearing, including behind you.
 - Speed is a staircase: they start slow and step up every 15 seconds, with a
-  rising blip each time, until they cap out around 2:20 in. Spawn *rate* still
+  rising blip each time, until they cap out around 4:00 in. Spawn *rate* still
   ramps smoothly over the first 100 seconds.
 
 Desktop fallback for testing without the headset: click once to grab the mouse
@@ -274,7 +274,15 @@ side by side:
 ?classic      the build as it stood at the start of the current session
 ?god          shields never run out (the HUD says TEST MODE so you cannot forget)
 ?lives=9      start with a different number
+?hitch        console-log frames over 30 ms, and any shader compiled mid-game
+?nowarm       skip the boot-time shader warm-up (compare against it with ?hitch)
 ```
+
+Every shader is compiled behind the title (`renderer.compileAsync` in
+`main.js`), including one hidden spare of each thing built on demand -- held
+beam, pulsar, nebula, shard -- so the sun's death never stalls on a compile. If
+you add an effect that is created mid-game, add a spare of it there too;
+`?hitch` will show `new shader(s)` during play if one slipped through.
 
 `?classic` is a **rolling baseline**, not a fixed one. Open it in a second tab,
 capture the same thirty seconds in both, and every change has a real before and
@@ -297,6 +305,16 @@ A laptop on the LAN adds real network timing; the headset adds stereo cost and
 comfort, and is worth saving until the mechanics have settled.
 
 The live scene is exposed on `window.__NH` for poking around in devtools.
+
+`node tools/playtest.mjs` (with `npm run start:http` running) is a headless
+flat-screen smoke test: it shoots NORMAL, plays with the mouse for 50 seconds,
+and reports console errors, frame times and screenshots. Env vars are listed at
+the top of the file; it borrows puppeteer-core from Salvo's node_modules.
+`NH_IDLE=1` plays without firing and fails if the run scores anything.
+
+`node tools/landing-chain.mjs` stages a meteor landing beside another, then the
+same pair with the first one shot: the landing's shrapnel should still clear its
+neighbour without paying for it, and the shot's chain should pay `blastPoints`.
 
 ## Layout
 

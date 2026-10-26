@@ -610,20 +610,16 @@ export class SunBoss {
   }
 
   // Where along a ray the boss would be hit: { t, piece } or null. piece is -1
-  // for the sun or the nebula, or which pulsar.
+  // for the sun or the nebula, or which pulsar. While it is up there but cannot
+  // be hurt yet -- rising, breaking, trembling, gathering, stirring -- a shot
+  // still stops on it, as { t, deflect: true }, so it glances off instead of
+  // sailing through and players can see they have to wait.
   rayHit(origin, dir, range) {
-    if (!this.hittable) return null;
+    if (!this.hittable) return this._deflectHit(origin, dir, range);
 
     if (this.phase === 'fight') {
-      if (dir.z >= -1e-4) return null;
-      const c = this.scenery.sunPosition();
-      const t = (c.z - origin.z) / dir.z;
-      if (t <= 0 || t > range) return null;
-      const px = origin.x + dir.x * t - c.x;
-      const py = origin.y + dir.y * t - c.y;
-      const r = this.radius;
-      if (px * px + py * py > (r * 1.05) ** 2) return null;
-      return { t, piece: -1 };
+      const t = this._sunHit(origin, dir, range);
+      return t != null ? { t, piece: -1 } : null;
     }
 
     if (this.phase === 'pulsars') {
@@ -639,6 +635,49 @@ export class SunBoss {
     if (this.phase === 'nebula') {
       const t = raySphere(origin, dir, this.nebulaCenter, this.nebulaSize * 0.3);
       return t != null && t <= range ? { t, piece: -1 } : null;
+    }
+    return null;
+  }
+
+  // The sun's disc faces the players, so it is hit where the ray crosses its plane.
+  _sunHit(origin, dir, range) {
+    if (dir.z >= -1e-4) return null;
+    const c = this.scenery.sunPosition();
+    const t = (c.z - origin.z) / dir.z;
+    if (t <= 0 || t > range) return null;
+    const px = origin.x + dir.x * t - c.x;
+    const py = origin.y + dir.y * t - c.y;
+    return px * px + py * py > (this.radius * 1.05) ** 2 ? null : t;
+  }
+
+  // Everything that hangs in the sky without hit points, as the poses above
+  // draw it. Spheres are generous: these are cues, not hitboxes that count.
+  _deflectHit(origin, dir, range) {
+    const near = (t) => (t != null && t <= range ? { t, piece: -1, deflect: true } : null);
+
+    if (this.phase === 'rising') return near(this._sunHit(origin, dir, range));
+
+    const shardsUp = this.phase === 'breaking' || this.phase === 'igniting' ||
+      (this.phase === 'none' && this.stage === PULSARS);
+    if (shardsUp) {
+      let best = null;
+      for (const sh of this.shards) {
+        if (!sh.mesh.visible) continue;
+        // A third of the disc, about its own middle -- and as it collapses into
+        // a pulsar, at least the pulsar's core.
+        const r = Math.max(SUN_R * 0.5 * sh.mesh.scale.x,
+          this.phase === 'igniting' ? CFG.pulsarHitRadius : 0);
+        const t = raySphere(origin, dir, sh.mesh.position, r);
+        if (t != null && (best == null || t < best)) best = t;
+      }
+      return near(best);
+    }
+
+    const nebulaUp = this.phase === 'gathering' || this.phase === 'stirring' ||
+      (this.phase === 'none' && this.stage === NEBULA);
+    if (nebulaUp && this.nebula) {
+      const k = this.phase === 'gathering' ? ease(clamp01(this.t / GATHER)) : 1;
+      return near(raySphere(origin, dir, this.nebulaCenter, CFG.nebulaSize * (0.3 + 0.7 * k) * 0.3));
     }
     return null;
   }

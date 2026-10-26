@@ -170,8 +170,10 @@ export class HUD {
 
     if (seats.length <= 1) {
       p.glowText(String(mineRow.score).padStart(6, '0'), 512, 70, 84, HEX(PALETTE.sunTop));
+      // Right of the score, mirroring the weapon on the left. Down on the
+      // shields row it sat on top of the eighth to tenth shield.
       if (mineRow.combo > 1.01) {
-        p.glowText(`x${mineRow.combo.toFixed(2)}`, 800, 150, 40, HEX(PALETTE.skyHorizon));
+        p.glowText(`x${mineRow.combo.toFixed(2)}`, CFG.classic ? 800 : 852, CFG.classic ? 150 : 70, 40, HEX(PALETTE.skyHorizon));
       }
       if (held) p.glowText(heldText, 170, 70, 36, HEX(held.color));
     } else {
@@ -200,8 +202,14 @@ export class HUD {
 
     // Shields are shared, so the row is centred whatever the column count.
     const rowY = seats.length > 1 ? 176 : 150;
-    p.glowText('SHIELDS', 392, rowY, 30, HEX(PALETTE.gridNear));
     const spec = MODES[mode];
+    // Before the first mode is picked there is no shield count to show: the
+    // default would be five boxes on a title screen offering three modes of ten.
+    if (!spec && !CFG.classic && !CFG.infiniteLives) {
+      p.commit();
+      return;
+    }
+    p.glowText('SHIELDS', 392, rowY, 30, HEX(PALETTE.gridNear));
     if (spec) p.glowText(spec.label, 150, rowY, 24, HEX(spec.color));
     if (CFG.infiniteLives) {
       // Say it loudly. A cheat you forgot you left on turns into a bug report.
@@ -226,7 +234,9 @@ export class HUD {
       return;
     }
     p.mesh.visible = true;
-    let y = 256 - ((lines.length - 1) * 78) / 2;
+    // Centred, except that a fourth line grows the block upward: centring it
+    // pushed the game-over prompt down onto the mode buttons.
+    let y = 256 - ((lines.length - 1) * 78) / 2 - Math.max(0, lines.length - 3) * 39;
     for (const l of lines) {
       p.glowText(l.text, 512, y, l.size || 56, l.color || HEX(PALETTE.gridNear));
       y += 78;

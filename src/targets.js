@@ -364,7 +364,10 @@ export class TargetField {
       if (!authoritative) continue;
       if (k.lands && t.obj.position.y <= t.radius) {
         landed.push(t);
-        this.explosions.burst(t.obj.position, null);
+        // Nobody's shot, so nobody's blast: the shrapnel still takes out what
+        // is falling beside it -- a little mercy for the shield it just cost --
+        // but an owner of null is what tells the host not to pay for it.
+        this.explosions.burst(t.obj.position, null, null);
         this._release(t);
       } else if (k.powerup && t.obj.position.z > CFG.powerupEndZ) {
         this._release(t);   // drove past it

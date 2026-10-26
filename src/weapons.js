@@ -133,6 +133,11 @@ const BEAMS = 32;          // worst case: your shotgun blasts plus everyone else
 const BOLT_SPEED = 230;    // metres per second; main.js delays the damage to match
 const BOLT_TRAIL = 14;     // metres of streak behind the head
 const SPARKS = 10;
+// A shot glancing off a boss that cannot be hurt yet: a smaller, paler spark
+// with none of the shot's colour, where a hit is a bright neon starburst.
+// `hit.deflect` marks one; over the network it travels as 2 where a real far
+// hit is 1.
+const DEFLECT = { gain: 0.8, size: 0.7, color: 0xb8c8ff };
 const ORBS = 6;
 const ORB_SPEED = 20;      // metres per second -- visibly slower than a beam
 const ORB_LIFE = 3.2;      // seconds before a miss fizzles out
@@ -165,6 +170,8 @@ function makeOrb() {
 const CAMERA_SOURCES = new Set(['mouse', 'pad']);
 // How a source is named to other players: which gun on their outline of us.
 const handCode = (source) => (CAMERA_SOURCES.has(source) ? -1 : source);
+// What a shot reached: 0 nothing, 1 something it hurts, 2 a boss it glances off.
+const hitCode = (hit) => (!hit ? 0 : hit.deflect ? 2 : 1);
 const round = (v) => Math.round(v * 100) / 100;
 const vec = (v) => [round(v.x), round(v.y), round(v.z)];
 const REMOTE_STREAM_HZ = 15;     // how often a held beam tells the others where it lands
@@ -181,7 +188,7 @@ const STREAM = {
   damage: 1,
 };
 
-function makeStream() {
+export function makeStream() {
   // A flat ribbon, not a cylinder. The beam starts beside your eye and runs
   // away from you, so you see it nearly end-on -- and a cylinder seen end-on
   // has no side facing the camera to shade. A ribbon turned to face the camera
@@ -272,7 +279,7 @@ function makeSpark() {
       transparent: true,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
-      uniforms: { uTime: { value: 0 }, uColor: { value: new THREE.Color() } },
+      uniforms: { uTime: { value: 0 }, uColor: { value: new THREE.Color() }, uGain: { value: 1 } },
       vertexShader: [
         'varying vec2 vUv;',
         'void main() {',
@@ -281,7 +288,7 @@ function makeSpark() {
         '}',
       ].join('\n'),
       fragmentShader: [
-        'uniform float uTime; uniform vec3 uColor;',
+        'uniform float uTime; uniform vec3 uColor; uniform float uGain;',
         'varying vec2 vUv;',
         'void main() {',
         '  vec2 p = (vUv - 0.5) * 2.0;',
@@ -290,7 +297,8 @@ function makeSpark() {
         '  float rays = pow(abs(sin(a * 4.0 + uTime * 9.0)), 12.0) * (1.0 - r);',
         '  float glow = exp(-r * 4.0);',
         '  float k = clamp(glow + rays * 0.9, 0.0, 1.0) * (0.8 + 0.2 * sin(uTime * 60.0));',
-        '  gl_FragColor = vec4(mix(uColor, vec3(1.0), glow) * k, k);',
+        // Gain dims through alpha alone: additive blending already squares k.
+        '  gl_FragColor = vec4(mix(uColor, vec3(1.0), glow * uGain) * k, k * uGain);',
         '}',
       ].join('\n'),
     })
@@ -323,6 +331,7 @@ export class Blasters {
     this.held = new Map();        // source -> true while its trigger is down
     this.cooldown = new Map();    // source -> seconds until it may fire again
     this.heldFor = new Map();     // source -> seconds its trigger has been down
+    this.queued = new Set();      // sources pressed during their cooldown
     this.streams = new Map();     // source -> the held rainbow beam
     this.scene = scene;
     this.clock = 0;
@@ -383,11 +392,14 @@ export class Blasters {
 
   // A press always tries to fire at once -- a semi-auto weapon that waited for
   // the next frame would feel like input lag. Holding only matters to automatics.
+  // A press during the cooldown is kept and fires the moment it ends: dropped,
+  // a quick double-click on the shotgun or orb lost every other shot silently.
   triggerDown(source) {
     if (this.held.get(source)) return;
     this.held.set(source, true);
     this.heldFor.set(source, 0);
     if ((this.cooldown.get(source) || 0) <= 0) this.fire(source);
+    else if (!CFG.classic) this.queued.add(source);
   }
 
   triggerUp(source) {
@@ -398,6 +410,7 @@ export class Blasters {
 
   releaseAll() {
     for (const source of [...this.held.keys()]) this.triggerUp(source);
+    this.queued.clear();
   }
 
   _stream(source) {
@@ -451,8 +464,10 @@ export class Blasters {
     if (s.tickIn <= 0) {
       s.tickIn = STREAM.tick;
       hit = this.hooks.ray(origin, dir, STREAM.damage);
-      if (source === 'pad' && this.pad) this.pad.rumble(hit ? 0.35 : 0.15, 90);
-      else if (!flat) this._feedback(source, !!hit, { rays: 1 });
+      const landed = !!hit && !hit.deflect;
+      if (flat && landed && this.hooks.mark) this.hooks.mark();
+      if (source === 'pad' && this.pad) this.pad.rumble(landed ? 0.35 : 0.15, 90);
+      else if (!flat) this._feedback(source, landed, { rays: 1 });
     } else {
       hit = this.hooks.probe(origin, dir);
     }
@@ -460,18 +475,19 @@ export class Blasters {
     const len = hit ? hit.distance : MAX_RANGE;
     const impact = origin.clone().addScaledVector(dir, len);
     const width = (flat ? 0.16 : 0.07) * (1 + Math.sin(this.clock * 31) * 0.1);
-    this._drawStream(s, muzzle, impact, !!hit, width, flat ? 1.6 : 0.9, dt);
+    this._drawStream(s, muzzle, impact, hitCode(hit), width, flat ? 1.6 : 0.9, dt);
 
     // Tell the others where it lands, a few times a second. They draw it from
     // their outline of us and smooth between updates.
     s.sendIn = (s.sendIn || 0) - dt;
     if (s.sendIn <= 0 && this.hooks.fx) {
       s.sendIn = 1 / REMOTE_STREAM_HZ;
-      this.hooks.fx({ k: 'beam', s: handCode(source), e: vec(impact), h: hit ? 1 : 0 });
+      this.hooks.fx({ k: 'beam', s: handCode(source), e: vec(impact), h: hitCode(hit) });
     }
   }
 
   // Lay a rainbow ribbon from `muzzle` to `impact`, turned to face this camera.
+  // `hit` is a hitCode: 0 nothing there, 1 a hit, 2 glancing off.
   _drawStream(s, muzzle, impact, hit, width, sparkScale, dt) {
     const length = Math.max(0.01, muzzle.distanceTo(impact));
     s.alpha = Math.min(1, (s.alpha || 0) + dt * 8);
@@ -496,16 +512,20 @@ export class Blasters {
     }
     s.beam.visible = true;
 
-    s.spark.visible = hit;
+    s.spark.visible = !!hit;
     if (hit) {
+      const dim = hit === 2;
       this.camera.getWorldPosition(eye);
       s.spark.position.copy(impact).addScaledVector(fwd, -0.2);
       s.spark.lookAt(eye);
       s.spark.scale.setScalar(sparkScale);
-      s.spark.material.uniforms.uTime.value = this.clock % 600;
+      const u = s.spark.material.uniforms;
+      u.uTime.value = this.clock % 600;
+      u.uGain.value = dim ? DEFLECT.gain : 1;
       // The spark takes whatever colour the beam is at the far end.
       const h = ((length * 0.14 - this.clock * 0.9) % 1 + 1) % 1;
-      s.spark.material.uniforms.uColor.value.setHSL(h, 1, 0.6);
+      if (dim) u.uColor.value.set(C(DEFLECT.color));
+      else u.uColor.value.setHSL(h, 1, 0.6);
     }
   }
 
@@ -583,11 +603,12 @@ export class Blasters {
           d.addScaledVector(right, Math.cos(a) * m).addScaledVector(up, Math.sin(a) * m).normalize();
         }
         const hit = this.hooks.ray(origin, d, spec.damage);
-        if (hit) anyHit = true;
+        if (hit && !hit.deflect) anyHit = true;
         const impact = origin.clone().addScaledVector(d, hit ? hit.distance : MAX_RANGE);
-        this._beam(muzzle, impact, color, flat ? 1 : 0.5, !!(hit && hit.far));
+        const bolt = hit && hit.far ? hitCode(hit) : 0;
+        this._beam(muzzle, impact, color, flat ? 1 : 0.5, bolt);
         impacts.push(...vec(impact));
-        far.push(hit && hit.far ? 1 : 0);
+        far.push(bolt);
       }
       if (this.hooks.fx) this.hooks.fx({ k: 'ray', s: handCode(source), c: color, e: impacts, f: far });
     }
@@ -602,7 +623,7 @@ export class Blasters {
     if (!from) return;
     if (m.k === 'ray' && Array.isArray(m.e)) {
       for (let i = 0; i + 2 < m.e.length; i += 3) {
-        const bolt = !!(Array.isArray(m.f) && m.f[i / 3]);
+        const bolt = Array.isArray(m.f) ? m.f[i / 3] || 0 : 0;
         this._beam(from, new THREE.Vector3(m.e[i], m.e[i + 1], m.e[i + 2]), m.c, 0.7, bolt);
       }
     } else if (m.k === 'orb' && m.o && m.d) {
@@ -630,7 +651,7 @@ export class Blasters {
         s.alpha = 0;
         s.impact.copy(s.goal);
       }
-      s.hit = !!m.h;
+      s.hit = m.h === 2 ? 2 : m.h ? 1 : 0;
       s.age = 0;
     }
   }
@@ -641,7 +662,27 @@ export class Blasters {
     s.spark.visible = false;
   }
 
-  _beam(from, to, color, thickness, bolt = false) {
+  // Someone left (or we dropped off the relay): take their held beams out of
+  // the scene for good. `ids` is everyone still here; anyone else goes.
+  pruneRemote(ids) {
+    const here = new Set(ids.map(String));
+    for (const [key, s] of this.remoteStreams) {
+      if (here.has(String(s.id))) continue;
+      this.scene.remove(s.beam, s.spark);
+      // Core and glow share one geometry; each has its own material.
+      s.beam.traverse((o) => {
+        if (o.geometry) o.geometry.dispose();
+        if (o.material) o.material.dispose();
+      });
+      s.spark.geometry.dispose();
+      s.spark.material.dispose();
+      this.remoteStreams.delete(key);
+    }
+  }
+
+  // `bolt` is a hitCode: 0 an instant line, 1 a bolt flying out to a hit,
+  // 2 a bolt that glances off.
+  _beam(from, to, color, thickness, bolt = 0) {
     const b = this.beams.find((x) => x.userData.flash <= 0 && !x.userData.bolt) || this.beams[0];
     b.position.copy(from);
     b.lookAt(to);
@@ -655,6 +696,7 @@ export class Blasters {
       // Fly first; the flash of the whole line starts when it arrives.
       b.userData.bolt = {
         from: from.clone(), to: to.clone(), dist: from.distanceTo(to), run: 0, thickness, color,
+        dim: bolt === 2,
       };
       b.userData.flash = FLASH * 1.6;
       this._placeBolt(b);
@@ -677,11 +719,12 @@ export class Blasters {
     b.scale.set(th, th, Math.max(0.01, head - tail));
   }
 
-  _spark(at, size, color) {
+  _spark(at, size, color, gain = 1) {
     const s = this.sparks.find((x) => x.userData.life <= 0) || this.sparks[0];
     s.position.copy(at);
     s.scale.setScalar(size);
     s.material.uniforms.uColor.value.set(C(color));
+    s.material.uniforms.uGain.value = gain;
     s.userData.life = 0.28;
     s.userData.size = size;
     s.visible = true;
@@ -700,6 +743,8 @@ export class Blasters {
   _feedback(source, hit, spec) {
     const strong = spec.orb ? 0.5 : hit ? 0.6 : 0.22;
     const ms = spec.rays > 1 ? 90 : hit ? 60 : 30;
+    // A flat screen has no hands to buzz, so a hit shows on the crosshair.
+    if (hit && CAMERA_SOURCES.has(source) && this.hooks.mark) this.hooks.mark();
     if (source === 'pad') {
       if (this.pad) this.pad.rumble(strong, ms);
       return;
@@ -726,7 +771,8 @@ export class Blasters {
     for (const [source, t] of this.cooldown) {
       const left = t - dt;
       this.cooldown.set(source, left);
-      if (left <= 0 && this.held.get(source) && this.spec.auto) this.fire(source);
+      if (left > 0) continue;
+      if (this.queued.delete(source) || (this.held.get(source) && this.spec.auto)) this.fire(source);
     }
 
     // Other players' held beams: follow their outline's gun, glide toward the
@@ -772,7 +818,9 @@ export class Blasters {
         b.scale.set(th, th, bolt.dist);
         const eye = new THREE.Vector3();
         this.camera.getWorldPosition(eye);
-        this._spark(bolt.to, Math.max(1.5, bolt.to.distanceTo(eye) * 0.09), bolt.color);
+        const size = Math.max(1.5, bolt.to.distanceTo(eye) * 0.09);
+        if (bolt.dim) this._spark(bolt.to, size * DEFLECT.size, DEFLECT.color, DEFLECT.gain);
+        else this._spark(bolt.to, size, bolt.color);
       }
       if (b.userData.flash <= 0) continue;
       b.userData.flash -= dt;
@@ -795,6 +843,9 @@ export class Blasters {
       o.position.addScaledVector(u.dir, step);
       const pulse = 1 + Math.sin(u.life * 30) * 0.12;
       o.scale.set(pulse, pulse, pulse);
+      // An orb lands after the trigger's feedback has gone, so it marks the
+      // crosshair itself when it pops on something.
+      if (hit && !hit.deflect && !u.remote && this.hooks.mark) this.hooks.mark();
       if (hit || u.life <= 0) {
         u.life = 0;
         o.visible = false;
