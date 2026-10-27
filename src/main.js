@@ -442,7 +442,7 @@ blasters.camera = camera;
 // Everyone else, as outlines standing beside you, with their shots coming
 // from their outline's blaster. See ghosts.js.
 const ghosts = new Ghosts(scene);
-blasters.remoteMuzzle = (id, hand) => ghosts.muzzle(id, hand);
+blasters.remoteMuzzle = (id, hand, out) => ghosts.muzzle(id, hand, out);
 let poseIn = 0;
 const POSE_EVERY = 0.1;   // seconds between pose updates
 

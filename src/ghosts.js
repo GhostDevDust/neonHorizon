@@ -23,6 +23,23 @@ const ARM = 0.3;       // upper and lower arm, metres
 const FLAT_GUN = new THREE.Vector3(0.24, -0.32, -0.34);
 const MUZZLE = new THREE.Vector3(0, 0.01, -0.2);
 
+// Scratch for building a figure each frame. Every outline is redrawn from the
+// head out and written straight into its geometry, so they can all share these.
+const V = () => new THREE.Vector3();
+const _fwd = V(), _right = V();
+const _chin = V(), _neck = V(), _hips = V(), _shL = V(), _shR = V();
+const _hipL = V(), _hipR = V(), _kneeL = V(), _kneeR = V(), _footL = V(), _footR = V();
+const _handL = V(), _handR = V(), _elbowL = V(), _elbowR = V(), _reach = V();
+// The fixed part of the figure, as pairs of line ends; the arms follow it.
+const SKELETON = [
+  _chin, _neck,
+  _neck, _hips,
+  _shL, _shR,
+  _hipL, _hipR,
+  _hipL, _kneeL, _kneeL, _footL,
+  _hipR, _kneeR, _kneeR, _footR,
+];
+
 function lineMat(color) {
   return new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9, depthWrite: false });
 }
@@ -168,82 +185,88 @@ class Ghost {
     }
 
     this._body(vr);
-    if (this.label) this.label.position.copy(this.head.position).add(new THREE.Vector3(0, 0.32, 0));
+    if (this.label) {
+      this.label.position.copy(this.head.position);
+      this.label.position.y += 0.32;
+    }
   }
 
   // A simple figure hung off the head: it turns with the head's heading but
   // stays upright, and scales with eye height so a seated player looks seated.
   _body(vr) {
     const head = this.head.position;
-    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(this.head.quaternion);
+    const fwd = _fwd.set(0, 0, -1).applyQuaternion(this.head.quaternion);
     fwd.y = 0;
     if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1);
     fwd.normalize();
-    const right = new THREE.Vector3(-fwd.z, 0, fwd.x);
+    const right = _right.set(-fwd.z, 0, fwd.x);
     const eye = Math.max(0.6, head.y);
-    const at = (up, side, ahead = 0) => new THREE.Vector3(head.x, up, head.z)
+    const at = (out, up, side, ahead = 0) => out.set(head.x, up, head.z)
       .addScaledVector(right, side).addScaledVector(fwd, ahead);
 
-    const chin = new THREE.Vector3(head.x, head.y - 0.14, head.z);
-    const neck = at(eye * 0.88, 0);
-    const hips = at(eye * 0.56, 0);
-    const shL = at(eye * 0.85, -0.2);
-    const shR = at(eye * 0.85, 0.2);
-    const hipL = at(eye * 0.56, -0.12);
-    const hipR = at(eye * 0.56, 0.12);
-    const kneeL = at(eye * 0.29, -0.14, 0.05);
-    const kneeR = at(eye * 0.29, 0.14, 0.05);
-    const footL = at(0, -0.16);
-    const footR = at(0, 0.16);
+    _chin.set(head.x, head.y - 0.14, head.z);
+    at(_neck, eye * 0.88, 0);
+    at(_hips, eye * 0.56, 0);
+    const shL = at(_shL, eye * 0.85, -0.2);
+    const shR = at(_shR, eye * 0.85, 0.2);
+    at(_hipL, eye * 0.56, -0.12);
+    at(_hipR, eye * 0.56, 0.12);
+    at(_kneeL, eye * 0.29, -0.14, 0.05);
+    at(_kneeR, eye * 0.29, 0.14, 0.05);
+    at(_footL, 0, -0.16);
+    at(_footR, 0, 0.16);
 
     // Hands: wherever the blasters are, or hanging at the sides.
-    const hands = [null, null];   // [left, right]
+    let handL = null;
+    let handR = null;
     if (vr) {
       for (let i = 0; i < 2; i++) {
         if (!this.guns[i].visible) continue;
         const p = this.guns[i].position;
-        let side = p.clone().sub(head).dot(right) >= 0 ? 1 : 0;
-        if (hands[side]) side = 1 - side;
-        hands[side] = p.clone();
+        let side = _reach.copy(p).sub(head).dot(right) >= 0 ? 1 : 0;
+        if (side ? handR : handL) side = 1 - side;
+        if (side) handR = p;
+        else handL = p;
       }
     } else {
-      hands[1] = this.guns[2].position.clone();
+      handR = this.guns[2].position;
     }
-    const arm = (shoulder, hand, sign) => {
+
+    const a = this.bodyGeo.attributes.position;
+    let n = 0;
+    const put = (v) => a.setXYZ(n++, v.x, v.y, v.z);
+    // `out` becomes the hand; the gun positions it may start from are not touched.
+    const arm = (shoulder, hand, sign, out, elbow) => {
       const h = hand
-        ? hand.clone()
-        : shoulder.clone().addScaledVector(right, sign * 0.05).setY(shoulder.y - ARM * 1.9);
+        ? out.copy(hand)
+        : out.copy(shoulder).addScaledVector(right, sign * 0.05).setY(shoulder.y - ARM * 1.9);
       // Pull an unreachable hand in to arm's length, then bend the elbow down.
-      const reach = h.clone().sub(shoulder);
+      const reach = _reach.copy(h).sub(shoulder);
       if (reach.length() > ARM * 2) h.copy(shoulder).addScaledVector(reach.normalize(), ARM * 2);
-      const elbow = shoulder.clone().lerp(h, 0.5).add(new THREE.Vector3(0, -0.12, 0)).addScaledVector(right, sign * 0.06);
-      return [shoulder, elbow, elbow, h];
+      elbow.copy(shoulder).lerp(h, 0.5).addScaledVector(right, sign * 0.06);
+      elbow.y -= 0.12;
+      put(shoulder);
+      put(elbow);
+      put(elbow);
+      put(h);
     };
 
-    const pts = [
-      chin, neck,
-      neck, hips,
-      shL, shR,
-      hipL, hipR,
-      hipL, kneeL, kneeL, footL,
-      hipR, kneeR, kneeR, footR,
-      ...arm(shL, hands[0], -1),
-      ...arm(shR, hands[1], 1),
-    ];
-    const a = this.bodyGeo.attributes.position;
-    for (let i = 0; i < pts.length; i++) a.setXYZ(i, pts[i].x, pts[i].y, pts[i].z);
+    for (const v of SKELETON) put(v);
+    arm(shL, handL, -1, _handL, _elbowL);
+    arm(shR, handR, 1, _handR, _elbowR);
     a.needsUpdate = true;
   }
 
   // World position a shot from this player's `hand` should start at: -1 is a
   // flat-screen player's blaster, 0 and 1 are a VR player's hands.
-  muzzle(hand) {
+  // Written into `out` when given: the held beams ask every frame.
+  muzzle(hand, out = new THREE.Vector3()) {
     let gun = hand >= 0 && this.guns[hand] && this.guns[hand].visible ? this.guns[hand] : null;
     if (!gun) gun = this.guns.find((g) => g.visible);
     if (!gun || this.seen < 0) {
-      return this.group.position.clone().add(new THREE.Vector3(0.2, 1.3, -0.3));
+      return out.set(0.2, 1.3, -0.3).add(this.group.position);
     }
-    return MUZZLE.clone().applyQuaternion(gun.quaternion).add(gun.position).add(this.group.position);
+    return out.copy(MUZZLE).applyQuaternion(gun.quaternion).add(gun.position).add(this.group.position);
   }
 
   dispose() {
@@ -290,9 +313,9 @@ export class Ghosts {
     if (g) g.pose(msg);
   }
 
-  muzzle(id, hand) {
+  muzzle(id, hand, out) {
     const g = this.all.get(id);
-    return g ? g.muzzle(hand) : null;
+    return g ? g.muzzle(hand, out) : null;
   }
 
   update(dt) {

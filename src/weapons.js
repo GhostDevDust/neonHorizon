@@ -177,6 +177,28 @@ const vec = (v) => [round(v.x), round(v.y), round(v.z)];
 const REMOTE_STREAM_HZ = 15;     // how often a held beam tells the others where it lands
 const REMOTE_STREAM_STALE = 0.4; // a remote beam with no word for this long has stopped
 
+// Scratch for the per-frame paths (held beams, bolts in flight, sparks, aim
+// rays). Allocating these every frame feeds the garbage collector, and on a
+// Quest a collection is a visible hitch. Nothing here outlives the call that
+// fills it -- anything kept is copied out.
+const _origin = new THREE.Vector3();
+const _dir = new THREE.Vector3();
+const _quat = new THREE.Quaternion();
+const _muzzle = new THREE.Vector3();
+const _right = new THREE.Vector3();
+const _up = new THREE.Vector3();
+const _impact = new THREE.Vector3();
+const _eye = new THREE.Vector3();
+const _fwd = new THREE.Vector3();
+const _mid = new THREE.Vector3();
+const _side = new THREE.Vector3();
+const _face = new THREE.Vector3();
+const _basis = new THREE.Matrix4();
+const _headAt = new THREE.Vector3();
+const _look = new THREE.Vector3();
+const _from = new THREE.Vector3();
+const _to = new THREE.Vector3();
+
 // --- the held beam ----------------------------------------------------------
 // Click the blaster and you get one laser. Hold it and, after a moment, that
 // becomes a solid beam that sweeps through the neon rainbow along its length.
@@ -446,15 +468,15 @@ export class Blasters {
       if (this.hooks.stream) this.hooks.stream(true);
     }
 
-    const origin = new THREE.Vector3();
-    const dir = new THREE.Vector3();
-    const quat = new THREE.Quaternion();
+    const origin = _origin;
+    const dir = _dir;
+    const quat = _quat;
     this._aim(source, origin, dir, quat);
     const flat = CAMERA_SOURCES.has(source);
-    const muzzle = origin.clone();
+    const muzzle = _muzzle.copy(origin);
     if (flat) {
-      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(quat);
-      const up = new THREE.Vector3(0, 1, 0).applyQuaternion(quat);
+      const right = _right.set(1, 0, 0).applyQuaternion(quat);
+      const up = _up.set(0, 1, 0).applyQuaternion(quat);
       muzzle.addScaledVector(right, 0.9).addScaledVector(up, -0.7).addScaledVector(dir, 2.0);
     }
 
@@ -473,7 +495,7 @@ export class Blasters {
     }
 
     const len = hit ? hit.distance : MAX_RANGE;
-    const impact = origin.clone().addScaledVector(dir, len);
+    const impact = _impact.copy(origin).addScaledVector(dir, len);
     const width = (flat ? 0.16 : 0.07) * (1 + Math.sin(this.clock * 31) * 0.1);
     this._drawStream(s, muzzle, impact, hitCode(hit), width, flat ? 1.6 : 0.9, dt);
 
@@ -491,18 +513,18 @@ export class Blasters {
   _drawStream(s, muzzle, impact, hit, width, sparkScale, dt) {
     const length = Math.max(0.01, muzzle.distanceTo(impact));
     s.alpha = Math.min(1, (s.alpha || 0) + dt * 8);
-    const eye = new THREE.Vector3();
+    const eye = _eye;
     this.camera.getWorldPosition(eye);
-    const fwd = impact.clone().sub(muzzle).normalize();
-    const mid = muzzle.clone().lerp(impact, 0.3);
-    const side = new THREE.Vector3().crossVectors(fwd, eye.sub(mid));
+    const fwd = _fwd.copy(impact).sub(muzzle).normalize();
+    const mid = _mid.copy(muzzle).lerp(impact, 0.3);
+    const side = _side.crossVectors(fwd, eye.sub(mid));
     if (side.lengthSq() < 1e-8) side.set(1, 0, 0);
     side.normalize();
     // fwd x side, not side x fwd: makeBasis needs a right-handed frame, and the
     // other order is a mirror image that setFromRotationMatrix cannot represent.
-    const face = new THREE.Vector3().crossVectors(fwd, side).normalize();
+    const face = _face.crossVectors(fwd, side).normalize();
     s.beam.position.copy(muzzle);
-    s.beam.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(side, face, fwd));
+    s.beam.quaternion.setFromRotationMatrix(_basis.makeBasis(side, face, fwd));
     s.beam.scale.set(width, 1, length);
     for (const layer of s.beam.children) {
       const u = layer.material.uniforms;
@@ -524,7 +546,7 @@ export class Blasters {
       u.uGain.value = dim ? DEFLECT.gain : 1;
       // The spark takes whatever colour the beam is at the far end.
       const h = ((length * 0.14 - this.clock * 0.9) % 1 + 1) % 1;
-      if (dim) u.uColor.value.set(C(DEFLECT.color));
+      if (dim) u.uColor.value.set(DEFLECT.color);
       else u.uColor.value.setHSL(h, 1, 0.6);
     }
   }
@@ -548,14 +570,20 @@ export class Blasters {
 
   // Every way the player is currently aiming: the view on a flat screen, each
   // tracked controller in VR. For lighting up whatever they point at.
+  // Called every frame on the menus, so the rays are kept and refilled: the
+  // array and its entries are only good until the next call.
   aimRays(vr) {
-    const sources = vr ? this.hands.map((h, i) => (h.connected ? i : null)).filter((i) => i != null) : ['mouse'];
-    return sources.map((source) => {
-      const origin = new THREE.Vector3();
-      const dir = new THREE.Vector3();
-      this._aim(source, origin, dir, new THREE.Quaternion());
-      return { origin, dir };
-    });
+    const out = this._aimRays || (this._aimRays = []);
+    const pool = this._aimPool || (this._aimPool = []);
+    out.length = 0;
+    const add = (source) => {
+      const r = pool[out.length] || (pool[out.length] = { origin: new THREE.Vector3(), dir: new THREE.Vector3() });
+      this._aim(source, r.origin, r.dir, _quat);
+      out.push(r);
+    };
+    if (vr) this.hands.forEach((h, i) => { if (h.connected) add(i); });
+    else add('mouse');
+    return out;
   }
 
   _aim(source, origin, dir, quat) {
@@ -619,17 +647,17 @@ export class Blasters {
   // actually went -- the world is shared, so their impact point is right here
   // too. Visual only: whatever it hit, the host has already been told.
   remoteFx(id, m) {
-    const from = this.remoteMuzzle && this.remoteMuzzle(id, m.s);
+    const from = this.remoteMuzzle && this.remoteMuzzle(id, m.s, _from);
     if (!from) return;
     if (m.k === 'ray' && Array.isArray(m.e)) {
       for (let i = 0; i + 2 < m.e.length; i += 3) {
         const bolt = Array.isArray(m.f) ? m.f[i / 3] || 0 : 0;
-        this._beam(from, new THREE.Vector3(m.e[i], m.e[i + 1], m.e[i + 2]), m.c, 0.7, bolt);
+        this._beam(from, _to.set(m.e[i], m.e[i + 1], m.e[i + 2]), m.c, 0.7, bolt);
       }
     } else if (m.k === 'orb' && m.o && m.d) {
       // Fly toward a point well down their orb's path, so it converges on the
       // line theirs is really travelling.
-      const aim = new THREE.Vector3().fromArray(m.o).addScaledVector(new THREE.Vector3().fromArray(m.d), 25);
+      const aim = _impact.fromArray(m.o).addScaledVector(_dir.fromArray(m.d), 25);
       this._launchOrb(from, aim.sub(from).normalize(), 0, true);
     } else if (m.k === 'beam') {
       const key = `${id}:${m.s}`;
@@ -687,17 +715,26 @@ export class Blasters {
     b.position.copy(from);
     b.lookAt(to);
     b.scale.set(thickness, thickness, from.distanceTo(to));
-    b.material.color.set(C(color));
+    b.material.color.set(color);
     b.material.opacity = 1;
     b.visible = true;
     b.userData.flash = FLASH;
     b.userData.bolt = null;
     if (bolt) {
       // Fly first; the flash of the whole line starts when it arrives.
-      b.userData.bolt = {
-        from: from.clone(), to: to.clone(), dist: from.distanceTo(to), run: 0, thickness, color,
-        dim: bolt === 2,
-      };
+      // One record per beam, refilled each shot rather than made fresh.
+      const u = b.userData.boltState || (b.userData.boltState = {
+        from: new THREE.Vector3(), to: new THREE.Vector3(), dir: new THREE.Vector3(),
+      });
+      u.from.copy(from);
+      u.to.copy(to);
+      u.dir.copy(to).sub(from).normalize();
+      u.dist = from.distanceTo(to);
+      u.run = 0;
+      u.thickness = thickness;
+      u.color = color;
+      u.dim = bolt === 2;
+      b.userData.bolt = u;
       b.userData.flash = FLASH * 1.6;
       this._placeBolt(b);
     }
@@ -709,11 +746,11 @@ export class Blasters {
     const u = b.userData.bolt;
     const head = Math.min(u.dist, u.run);
     const tail = Math.max(0, head - BOLT_TRAIL);
-    const dir = u.to.clone().sub(u.from).normalize();
+    const dir = u.dir;
     b.position.copy(u.from).addScaledVector(dir, tail);
-    const headAt = u.from.clone().addScaledVector(dir, head);
-    b.lookAt(headAt.clone().addScaledVector(dir, 1));
-    const eye = new THREE.Vector3();
+    const headAt = _headAt.copy(u.from).addScaledVector(dir, head);
+    b.lookAt(_look.copy(headAt).addScaledVector(dir, 1));
+    const eye = _eye;
     this.camera.getWorldPosition(eye);
     const th = u.thickness * 1.8 * Math.max(1, headAt.distanceTo(eye) / 14);
     b.scale.set(th, th, Math.max(0.01, head - tail));
@@ -723,7 +760,7 @@ export class Blasters {
     const s = this.sparks.find((x) => x.userData.life <= 0) || this.sparks[0];
     s.position.copy(at);
     s.scale.setScalar(size);
-    s.material.uniforms.uColor.value.set(C(color));
+    s.material.uniforms.uColor.value.set(color);
     s.material.uniforms.uGain.value = gain;
     s.userData.life = 0.28;
     s.userData.size = size;
@@ -780,7 +817,7 @@ export class Blasters {
     for (const s of this.remoteStreams.values()) {
       if (!s.on) continue;
       s.age += dt;
-      const from = s.age < REMOTE_STREAM_STALE && this.remoteMuzzle && this.remoteMuzzle(s.id, s.hand);
+      const from = s.age < REMOTE_STREAM_STALE && this.remoteMuzzle && this.remoteMuzzle(s.id, s.hand, _from);
       if (!from) {
         this._hideRemoteStream(s);
         continue;
@@ -793,9 +830,8 @@ export class Blasters {
       const u = s.userData;
       if (u.life <= 0) continue;
       u.life -= dt;
-      const eye = new THREE.Vector3();
-      this.camera.getWorldPosition(eye);
-      s.lookAt(eye);
+      this.camera.getWorldPosition(_eye);
+      s.lookAt(_eye);
       s.scale.setScalar(u.size * (0.6 + u.life * 2.5));
       s.material.uniforms.uTime.value = this.clock % 600;
       if (u.life <= 0) s.visible = false;
@@ -816,9 +852,8 @@ export class Blasters {
         b.lookAt(bolt.to);
         const th = bolt.thickness;
         b.scale.set(th, th, bolt.dist);
-        const eye = new THREE.Vector3();
-        this.camera.getWorldPosition(eye);
-        const size = Math.max(1.5, bolt.to.distanceTo(eye) * 0.09);
+        this.camera.getWorldPosition(_eye);
+        const size = Math.max(1.5, bolt.to.distanceTo(_eye) * 0.09);
         if (bolt.dim) this._spark(bolt.to, size * DEFLECT.size, DEFLECT.color, DEFLECT.gain);
         else this._spark(bolt.to, size, bolt.color);
       }

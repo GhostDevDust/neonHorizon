@@ -485,7 +485,9 @@ export function buildScenery(scene) {
   // breaks again at dawn -- in the new level's colours.
   let level = 0;
   let darkness = 0;
-  const dim = (hex, k) => new THREE.Color(hex).multiplyScalar(k);
+  // One scratch colour: every use below copies it straight out.
+  const dimmed = new THREE.Color();
+  const dim = (hex, k) => dimmed.set(hex).multiplyScalar(k);
   const paint = () => {
     const L = LEVELS[Math.min(level, LEVELS.length - 1)];
     const su = sun.material.uniforms;

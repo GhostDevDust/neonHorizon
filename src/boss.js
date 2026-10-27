@@ -50,6 +50,14 @@ const SUN = 0, PULSARS = 1, NEBULA = 2;
 const ease = (x) => x * x * (3 - 2 * x);
 const clamp01 = (x) => Math.min(1, Math.max(0, x));
 
+// Scratch for the per-frame poses, so a boss fight does not feed the garbage
+// collector (a collection is a visible hitch on a Quest).
+const _arcV = new THREE.Vector3();
+const _throwV = new THREE.Vector3();
+const EYE = new THREE.Vector3(0, 1.6, 0);
+// Phases where the sun has broken and is not on the horizon at all.
+const SUN_HIDDEN = new Set(['breaking', 'igniting', 'pulsars', 'gathering', 'stirring', 'nebula', 'dark']);
+
 export class SunBoss {
   // hooks: rise(), omen(), collapse(), nova(pos, killer), shardNova(pos, killer), birth(pos)
   // fx:    the big supernova, for the whole sun
@@ -126,7 +134,7 @@ export class SunBoss {
       this.novaFired = false;
       if (this.hooks.collapse) this.hooks.collapse();
     }
-    if (phase === 'dark' && this.hooks.birth) this.hooks.birth(this.nebulaCenter);
+    if (phase === 'dark' && this.hooks.birth) this.hooks.birth(this.nebulaCenter.clone());
     if (phase !== 'dying' && this.fx) this.fx.hide();
   }
 
@@ -154,24 +162,41 @@ export class SunBoss {
 
   // A path that arcs up through the sky rather than cutting a straight line
   // past the players.
+  // Shared scratch: copy it out before the next call.
   _arc(from, to, k) {
-    return from.clone().lerp(to, k).add(new THREE.Vector3(0, Math.sin(k * Math.PI) * 18, 0));
+    _arcV.copy(from).lerp(to, k);
+    _arcV.y += Math.sin(k * Math.PI) * 18;
+    return _arcV;
   }
 
   // Pulsars can hang behind the players, so the flat screen's edge arrows
   // point at them too.
+  // Asked every frame; the list and its entries are reused.
   cueTargets() {
-    if (this.phase !== 'pulsars') return [];
-    return this.pulsars
-      .map((p, i) => (p.alive ? { obj: { position: this._pulsarPos(p, i) }, color: 0xffffff } : null))
-      .filter(Boolean);
+    const out = this._cues || (this._cues = []);
+    out.length = 0;
+    if (this.phase !== 'pulsars') return out;
+    this.pulsars.forEach((p, i) => {
+      if (!p.alive) return;
+      this._pulsarPos(p, i);
+      out.push(p.cue || (p.cue = { obj: { position: p.pos }, color: 0xffffff }));
+    });
+    return out;
   }
 
-  // Where the sun died, a little higher, pushed well out into the sky.
+  // Where the sun died, a little higher, pushed well out into the sky. Only
+  // moves when deathAt does, so it is worked out once per death and kept --
+  // read it, never change it.
   get nebulaCenter() {
-    const eye = new THREE.Vector3(0, 1.6, 0);
-    const dir = this.deathAt.clone().add(new THREE.Vector3(0, 12, 0)).sub(eye).normalize();
-    return eye.addScaledVector(dir, CFG.nebulaDistance);
+    const at = this.deathAt;
+    if (!this._nebFor || !this._nebFor.equals(at)) {
+      this._nebFor = (this._nebFor || new THREE.Vector3()).copy(at);
+      const c = this._nebCenter || (this._nebCenter = new THREE.Vector3());
+      c.copy(at);
+      c.y += 12;
+      c.sub(EYE).normalize().multiplyScalar(CFG.nebulaDistance).add(EYE);
+    }
+    return this._nebCenter;
   }
 
   // --- shards ----------------------------------------------------------------
@@ -204,7 +229,7 @@ export class SunBoss {
     stations.forEach((station, i) => {
       this.pulsars.push({
         fx: makePulsar(this.world.scene, i + 1 + this.shardRot),
-        station, hp: hpMax, hpMax, alive: true, deathT: null, flash: 0,
+        station, pos: new THREE.Vector3(), hp: hpMax, hpMax, alive: true, deathT: null, flash: 0,
         throwIn: 1.4 + i * 1.1,
       });
     });
@@ -216,8 +241,11 @@ export class SunBoss {
     for (const m of this.minis) m.hide();
   }
 
+  // Kept on the pulsar (p.pos) and refreshed on every call.
   _pulsarPos(p, i) {
-    return p.station.clone().add(new THREE.Vector3(0, Math.sin(this.clock * 0.8 + i * 2.1) * 1.1, 0));
+    p.pos.copy(p.station);
+    p.pos.y += Math.sin(this.clock * 0.8 + i * 2.1) * 1.1;
+    return p.pos;
   }
 
   _pulsarDies(p, killer) {
@@ -225,7 +253,7 @@ export class SunBoss {
     p.hp = 0;
     p.deathT = this.clock;
     const i = this.pulsars.indexOf(p);
-    if (this.hooks.shardNova) this.hooks.shardNova(this._pulsarPos(p, i), killer);
+    if (this.hooks.shardNova) this.hooks.shardNova(this._pulsarPos(p, i).clone(), killer);
   }
 
   // --- nebula ----------------------------------------------------------------
@@ -354,7 +382,7 @@ export class SunBoss {
         if (this.nebula.throwIn <= 0) {
           const c = this.nebulaCenter;
           const r = this.nebulaSize * 0.35;
-          const from = c.add(new THREE.Vector3((Math.random() - 0.5) * r, (Math.random() - 0.5) * r, 0));
+          const from = _throwV.set((Math.random() - 0.5) * r, (Math.random() - 0.5) * r, 0).add(c);
           this._throw(from, 2, 0);
           this.nebula.throwIn = CFG.nebulaThrowEvery;
         }
@@ -553,13 +581,13 @@ export class SunBoss {
 
   _poseSun(dt) {
     const H = this.scenery.sunHome;
-    const near = { y: CFG.bossY, z: CFG.bossZ, s: CFG.bossScale };
+    const nearY = CFG.bossY, nearZ = CFG.bossZ, nearS = CFG.bossScale;
     let k = 0;
     if (this.phase === 'rising') k = ease(Math.min(1, this.t / CFG.bossRise));
     if (this.phase === 'fight' || this.phase === 'dying') k = 1;
-    let y = H.y + (near.y - H.y) * k;
-    let z = H.z + (near.z - H.z) * k;
-    let s = 1 + (near.s - 1) * k;
+    let y = H.y + (nearY - H.y) * k;
+    let z = H.z + (nearZ - H.z) * k;
+    let s = 1 + (nearS - 1) * k;
     let health = 1;
     let flare = k * 1.3;
 
@@ -574,7 +602,7 @@ export class SunBoss {
     // The sun is only on the horizon while it is the sun. Once it has broken,
     // the sky belongs to what it became.
     const sunGone = this.stage !== SUN && this.phase === 'none';
-    if (sunGone || ['breaking', 'igniting', 'pulsars', 'gathering', 'stirring', 'nebula', 'dark'].includes(this.phase)) {
+    if (sunGone || SUN_HIDDEN.has(this.phase)) {
       s = 0.0001;
     }
     if (this.phase === 'dawn') {

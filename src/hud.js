@@ -87,6 +87,9 @@ export class HUD {
     });
     this.modesShown = false;
     this._ray = new THREE.Raycaster();
+    // Hovering asks every frame on the menus, so these are kept, not rebuilt.
+    this._modeMeshes = this.modes.map((m) => m.panel.mesh);
+    this._hits = [];
   }
 
   showModes(on) {
@@ -124,15 +127,18 @@ export class HUD {
     if (!this.modesShown || !origin || !dir) return null;
     this.group.updateMatrixWorld(true);
     this._ray.set(origin, dir);
-    const hit = this._ray.intersectObjects(this.modes.map((m) => m.panel.mesh), false)[0];
+    this._hits.length = 0;
+    const hit = this._ray.intersectObjects(this._modeMeshes, false, this._hits)[0];
     return hit ? hit.object.userData.mode : null;
   }
 
   // Light up whichever buttons are being aimed at.
   hoverModes(rays) {
     if (!this.modesShown) return;
-    const hot = new Set(rays.map((r) => this.pickMode(r.origin, r.dir)).filter(Boolean));
-    for (const m of this.modes) this._drawMode(m, hot.has(m.name));
+    // At most one ray per hand, so a scan beats building a set each frame.
+    const a = rays[0] ? this.pickMode(rays[0].origin, rays[0].dir) : null;
+    const b = rays[1] ? this.pickMode(rays[1].origin, rays[1].dir) : null;
+    for (const m of this.modes) this._drawMode(m, m.name === a || m.name === b);
   }
 
   // Flat screen only. Targets fall from every bearing now, so the player turns
